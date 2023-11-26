@@ -1,34 +1,36 @@
-FROM ubuntu:14.10
+ARG ARCH=
+FROM ${ARCH}ubuntu:22.04
+
+ENV IPTABLES_VERSION 1.4.21
+ENV DOCKER_VERSION 24.0.7
+
+# Enable sources for build-dep below.
+RUN sed -i 's/^# deb-src /deb-src /' /etc/apt/sources.list
+
 RUN apt-get update
-RUN apt-get install -y \
-        busybox-static \
-        bc
+RUN apt-get install -y busybox-static bc wget libc6-dev
+
+# Build static iptables
 RUN apt-get build-dep -y --no-install-recommends iptables
 # This causes iptables to fail to compile... don't know why yet
 RUN apt-get purge -y libnfnetlink-dev
-
-# Build static iptables
-COPY iptables-1.4.21.tar.bz2 /usr/src/
+RUN wget -O /usr/src/iptables-${IPTABLES_VERSION}.tar.bz2 http://www.netfilter.org/projects/iptables/files/iptables-${IPTABLES_VERSION}.tar.bz2
 RUN cd /usr/src && \
-    tar xjf iptables-1.4.21.tar.bz2 && \
-    cd iptables-1.4.21 && \
+    tar xjf iptables-${IPTABLES_VERSION}.tar.bz2 && \
+    cd iptables-${IPTABLES_VERSION} && \
     ./configure --enable-static --disable-shared && \
-    make -j4 LDFLAGS="-all-static"
+    make -j8 CFLAGS="-static -static-libgcc" LDFLAGS="-all-static"
 
 # Build kernel
-COPY linux-3.18.1.tar.xz /usr/src/
+#RUN apt-get build-dep -y --no-install-recommends linux
+RUN apt-get install -y bc libelf-dev git libncurses-dev gawk flex \
+    bison openssl libssl-dev dkms libelf-dev libudev-dev libpci-dev \
+    libiberty-dev autoconf llvm kmod
 RUN cd /usr/src && \
-    tar xJf linux-3.18.1.tar.xz
-COPY assets/kernel_config /usr/src/linux-3.18.1/.config
-RUN cd /usr/src/linux-3.18.1 && \
-    make oldconfig
-RUN apt-get install -y bc
-RUN cd /usr/src/linux-3.18.1 && \
-    make -j4 bzImage
-RUN cd /usr/src/linux-3.18.1 && \
-    make -j4 modules
-RUN mkdir -p /usr/src/root && \
-    cd /usr/src/linux-3.18.1 && \
+    git clone --depth=1 https://github.com/raspberrypi/linux && \
+    cd linux && \
+    make KERNEL=kernel8 bcm2711_defconfig && \
+    make -j8 Image.gz modules dtbs && \
     make INSTALL_MOD_PATH=/usr/src/root modules_install firmware_install
 
 # Taken from boot2docker
@@ -47,10 +49,10 @@ RUN cd /usr/src/root/lib/modules && \
     rm -rf ./*/kernel/net/wireless/*
 
 # Install docker
+RUN wget -O /usr/src/docker-${DOCKER_VERSION}.tgz https://mirrors.aliyun.com/docker-ce/linux/static/stable/aarch64/docker-${DOCKER_VERSION}.tgz
 RUN apt-get install -y ca-certificates
-COPY docker-1.4.1.tgz /usr/src/
 RUN mkdir -p /usr/src/root/bin && \
-    tar xvzf /usr/src/docker-1.4.1.tgz --strip-components=3 -C /usr/src/root/bin
+    tar xvzf /usr/src/docker-${DOCKER_VERSION}.tgz --strip-components=1 -C /usr/src/root/bin
 
 # Create dhcp image
 RUN /usr/src/root/bin/docker -s vfs -d --bridge none & \
@@ -70,7 +72,7 @@ COPY assets/console-container.sh /usr/src/root/bin/
 RUN cd /usr/src/root/bin && \
     cp /bin/busybox . && \
     chmod u+s busybox && \
-    cp /usr/src/iptables-1.4.21/iptables/xtables-multi iptables && \
+    cp /usr/src/iptables-${IPTABLES_VERSION}/iptables/xtables-multi iptables && \
     strip --strip-all iptables && \
     for i in mount modprobe mkdir openvt sh mknod; do \
         ln -s busybox $i; \
@@ -82,7 +84,7 @@ RUN cd /usr/src/root/bin && \
 RUN mkdir -p /usr/src/only-docker/boot && \
     cd /usr/src/root && \
     find | cpio -H newc -o | lzma -c > ../only-docker/boot/initrd && \
-    cp /usr/src/linux-3.18.1/arch/x86_64/boot/bzImage ../only-docker/boot/vmlinuz
+    cp /usr/src/linux-${KERNEL_VERSION}/arch/x86_64/boot/bzImage ../only-docker/boot/vmlinuz
 RUN mkdir -p /usr/src/only-docker/boot/isolinux && \
     cp /usr/lib/ISOLINUX/isolinux.bin /usr/src/only-docker/boot/isolinux && \
     cp /usr/lib/syslinux/modules/bios/ldlinux.c32 /usr/src/only-docker/boot/isolinux
